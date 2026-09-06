@@ -8,7 +8,7 @@ from re import findall, match, search
 from requests import Session, post, get, RequestException
 from requests.adapters import HTTPAdapter
 from time import sleep
-from urllib.parse import parse_qs, urlparse, quote
+from urllib.parse import parse_qs, urljoin, urlparse, quote
 from urllib3.util.retry import Retry
 from uuid import uuid4
 from base64 import b64decode, b64encode
@@ -140,6 +140,32 @@ debrid_link_supported_sites = [
 ]
 
 
+# These hosts use the same public download-page flow: load the share page,
+# submit its download form, and use the resulting download URL.  Keep this
+# list separate from the debrid list because these links do not require a
+# debrid account.
+PUBLIC_FILE_HOSTS = {
+    "gdflix": ("gdflix.com", "gdflix.dad", "gdflix.lol", "gdflix.pro"),
+    "hubcloud": ("hubcloud.one", "hubcloud.foo", "hubcloud.lol", "hubcloud.cfd"),
+    "hubdrive": (
+        "hubdrive.com",
+        "hubdrive.in",
+        "hubdrive.one",
+        "hubdrive.space",
+        "hubdrive.xyz",
+    ),
+    "hubcdn": ("hubcdn.xyz", "hubcdn.one", "hubcdn.to"),
+    "streamhub": ("streamhub.ink", "streamhub.to"),
+    "vifix": ("vifix.site", "vifix.com", "vifix.to"),
+}
+
+
+def _is_host(domain, hosts):
+    """Return whether *domain* is a host in *hosts* or one of its subdomains."""
+    domain = (domain or "").lower().rstrip(".")
+    return any(domain == host or domain.endswith(f".{host}") for host in hosts)
+
+
 def direct_link_generator(link):
     """direct links generator"""
     domain = urlparse(link).hostname
@@ -181,7 +207,7 @@ def direct_link_generator(link):
         return krakenfiles(link)
     elif "upload.ee" in domain:
         return uploadee(link)
-    elif "gofile.io" in domain:
+    elif _is_host(domain, ("gofile.io",)):
         return gofile(link)
     elif "send.cm" in domain:
         return send_cm(link)
@@ -291,10 +317,18 @@ def direct_link_generator(link):
         ]
     ):
         return filelions_and_streamwish(link)
-    elif any(x in domain for x in ["streamhub.ink", "streamhub.to"]):
+    elif _is_host(domain, PUBLIC_FILE_HOSTS["gdflix"]):
+        return gdflix(link)
+    elif _is_host(domain, PUBLIC_FILE_HOSTS["streamhub"]):
         return streamhub(link)
-    elif any(x in domain for x in ["hubcloud.one", "hubcloud.foo"]):
+    elif _is_host(domain, PUBLIC_FILE_HOSTS["hubcloud"]):
         return hubcloud(link)
+    elif _is_host(domain, PUBLIC_FILE_HOSTS["hubdrive"]):
+        return hubdrive(link)
+    elif _is_host(domain, PUBLIC_FILE_HOSTS["hubcdn"]):
+        return hubcdn(link)
+    elif _is_host(domain, PUBLIC_FILE_HOSTS["vifix"]):
+        return vifix(link)
     elif any(
         x in domain
         for x in [
@@ -386,19 +420,79 @@ def debrid_link(url):
 
 
 def hubcloud(url):
-    try:
-        response = get(f"http://hubcloud.cfd/bypass?url={url}").json()
-    except Exception as e:
-        raise DirectDownloadLinkException(f"ERROR: {e.__class__.__name__}") from e
+    return public_file_host(url, "HubCloud")
 
-    if "links" not in response or not response["links"]:
-        raise DirectDownloadLinkException("ERROR: No links found")
 
-    # Sort links by priority in descending order
-    links = sorted(response["links"], key=lambda x: x.get("priority", 0), reverse=True)
+def hubdrive(url):
+    return public_file_host(url, "HubDrive")
 
-    # Return the url of the highest priority link
-    return links[0]["url"]
+
+def hubcdn(url):
+    return public_file_host(url, "HubCDN")
+
+
+def vifix(url):
+    return public_file_host(url, "VIFiX")
+
+
+def gdflix(url):
+    """Resolve GDFlix share pages using its public direct-download endpoint."""
+    return sharer_scraper(url)
+
+
+def _download_href(html, page_url):
+    """Extract a download or Google Drive URL from a public file-host page."""
+    hrefs = html.xpath(
+        '//a[contains(@class, "download") or contains(@href, "download") or '
+        'contains(@href, "drive.google.com") or contains(@href, "usercontent") or '
+        'contains(translate(normalize-space(.), "DOWNLOAD", "download"), "download")]/@href'
+    )
+    for href in hrefs:
+        direct_url = urljoin(page_url, href)
+        if direct_url.startswith(("https://", "http://")):
+            return direct_url
+    return None
+
+
+def public_file_host(url, service_name):
+    """Resolve XFileSharing-style pages used by the public Hub/VIFiX hosts.
+
+    The old HubCloud integration delegated every link to an unrelated bypass
+    service.  Resolving the site's own download form keeps links and cookies
+    local to the requested host and works for the related HubDrive, HubCDN,
+    Streamhub, and VIFiX services as well.
+    """
+    with create_scraper() as session:
+        try:
+            response = session.get(url)
+            page_url = response.url
+            html = HTML(response.text)
+            if direct_link := _download_href(html, page_url):
+                return direct_link
+
+            inputs = html.xpath('//form[@name="F1" or @id="download-form"]//input')
+            if not inputs:
+                raise DirectDownloadLinkException("ERROR: No download form found")
+            data = {
+                input_.get("name"): input_.get("value", "")
+                for input_ in inputs
+                if input_.get("name")
+            }
+            if not data:
+                raise DirectDownloadLinkException("ERROR: No download form data found")
+            session.headers.update({"Referer": page_url})
+            response = session.post(page_url, data=data)
+            if direct_link := _download_href(HTML(response.text), response.url):
+                return direct_link
+        except DirectDownloadLinkException:
+            raise
+        except RequestException as e:
+            raise DirectDownloadLinkException(
+                f"ERROR: Unable to reach {service_name}: {e.__class__.__name__}"
+            ) from e
+        except Exception as e:
+            raise DirectDownloadLinkException(f"ERROR: {e.__class__.__name__}") from e
+    raise DirectDownloadLinkException(f"ERROR: {service_name} direct link not found")
 
 
 def buzzheavier(link):
@@ -1799,31 +1893,8 @@ def streamvid(url: str):
 def streamhub(url):
     file_code = url.split("/")[-1]
     parsed_url = urlparse(url)
-    url = f"{parsed_url.scheme}://{parsed_url.hostname}/d/{file_code}"
-    with create_scraper() as session:
-        try:
-            html = HTML(session.get(url).text)
-        except Exception as e:
-            raise DirectDownloadLinkException(f"ERROR: {e.__class__.__name__}") from e
-        if not (inputs := html.xpath('//form[@name="F1"]//input')):
-            raise DirectDownloadLinkException("ERROR: No inputs found")
-        data = {}
-        for i in inputs:
-            if key := i.get("name"):
-                data[key] = i.get("value")
-        session.headers.update({"referer": url})
-        sleep(1)
-        try:
-            html = HTML(session.post(url, data=data).text)
-        except Exception as e:
-            raise DirectDownloadLinkException(f"ERROR: {e.__class__.__name__}") from e
-        if directLink := html.xpath(
-            '//a[@class="btn btn-primary btn-go downloadbtn"]/@href'
-        ):
-            return directLink[0]
-        if error := html.xpath('//div[@class="alert alert-danger"]/text()[2]'):
-            raise DirectDownloadLinkException(f"ERROR: {error[0]}")
-        raise DirectDownloadLinkException("ERROR: direct link not found!")
+    download_page = f"{parsed_url.scheme}://{parsed_url.hostname}/d/{file_code}"
+    return public_file_host(download_page, "Streamhub")
 
 
 def pcloud(url):
