@@ -37,6 +37,34 @@ class Merge:
             if await aiopath.exists(outfile):
                 self._processed_bytes = await get_path_size(outfile)
 
+    def _output_stem(self, path, custom_name=None):
+        """Return a usable name for the merged file.
+
+        Torrent clients can report a content directory with a trailing slash.
+        ``basename`` then returns an empty string, which previously produced an
+        upload named just ``.mkv``.  Normalising the path first also keeps the
+        usual directory-based name for all other download types.
+        """
+        normalized_path = ospath.normpath(path)
+        listener_dir = ospath.normpath(getattr(self._listener, "dir", ""))
+        # Single-root torrent contents are merged from the task directory. In
+        # that case the directory basename is the numeric task ID, not the
+        # torrent title, so use the listener's torrent name instead.
+        if listener_dir and normalized_path == listener_dir:
+            source_name = self._listener.name
+        else:
+            source_name = ospath.basename(normalized_path)
+        if custom_name:
+            # A custom name may include the output extension, but torrent
+            # directory names often contain dots that are part of the title.
+            custom_basename = ospath.basename(custom_name)
+            if not (
+                custom_basename.startswith(".")
+                and custom_basename.count(".") == 1
+            ):
+                source_name = ospath.splitext(custom_basename)[0] or custom_basename
+        return source_name or "merged"
+
     async def merge_vids(self, path, gid, keep_original=False, custom_name=None):
         list_files, remove_files, size = [], [], 0
         original_dir = None  # Track the directory where original files are located
@@ -56,13 +84,13 @@ class Merge:
         LOGGER.info(f'Merge check for: {path} | Found {len(list_files)} video file(s)')
         
         if len(list_files) > 1:
-            # Use custom name if provided, otherwise use directory name
+            # Use custom name if provided, otherwise use directory name.
+            # ``_output_stem`` handles trailing torrent content paths safely.
             if custom_name:
-                name_without_ext = ospath.splitext(custom_name)[0]
+                name_without_ext = self._output_stem(path, custom_name)
                 LOGGER.info(f'Using custom merge name: {name_without_ext}')
             else:
-                name = ospath.basename(path)
-                name_without_ext = ospath.splitext(name)[0]
+                name_without_ext = self._output_stem(path)
             async with task_dict_lock:
                 task_dict[self._listener.mid] = MergeStatus(name_without_ext, size, gid, self, self._listener)
             await update_status_message(self._listener.message.chat.id)
