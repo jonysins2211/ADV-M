@@ -10,7 +10,7 @@ An advanced, feature-rich Telegram bot for mirroring, leeching, and managing dow
 
 ### Download Methods
 - **Torrent Downloads**: qBittorrent and Aria2c support
-- **Direct Links**: HTTP/HTTPS direct downloads with resume capability
+- **Direct Links**: HTTP/HTTPS direct downloads with resume capability, including public GoFile, GDFlix, HubDrive, HubCloud, Streamhub, HubCDN, and VIFiX share links
 - **Google Drive**: Clone, download, and manage GDrive files
 - **Mega**: Full Mega.nz integration
 - **YouTube/Media**: yt-dlp powered downloads from 1000+ sites
