@@ -289,22 +289,6 @@ class TaskListener(TaskConfig):
             self.size = await get_path_size(up_path)
             self.clear()
 
-        # Apply attachment to MKV files
-        attachment_url = self.user_dict.get("ATTACHMENT_URL")
-        if attachment_url:
-            up_path = await apply_attachment(
-                self,
-                up_path,
-                gid,
-                attachment_url,
-            )
-            if self.is_cancelled:
-                return
-
-            self.name = up_path.replace(f"{up_dir.rstrip('/')}/", "").split("/", 1)[0]
-            self.size = await get_path_size(up_path)
-            self.clear()
-
         # Merge videos FIRST (before name_swap and metadata)
         if self.mergextool and not self.compress:
             should_merge = True
@@ -444,6 +428,28 @@ class TaskListener(TaskConfig):
             await self.proceed_split(up_path, gid)
             if self.is_cancelled:
                 return
+            self.clear()
+
+        # Apply the attachment only after every operation that writes a new
+        # media file, including splitting. Merging, metadata updates,
+        # conversion, sampling, compression, and splitting remux the input
+        # and do not preserve Matroska attachment streams, so applying it
+        # earlier made the configured cover disappear from the downloaded
+        # video.
+        attachment_url = self.user_dict.get("ATTACHMENT_URL")
+        if attachment_url:
+            up_path = await apply_attachment(
+                self,
+                up_path,
+                gid,
+                attachment_url,
+            )
+            if self.is_cancelled:
+                return
+
+            self.is_file = await aiopath.isfile(up_path)
+            self.name = up_path.replace(f"{up_dir.rstrip('/')}/", "").split("/", 1)[0]
+            self.size = await get_path_size(up_dir)
             self.clear()
 
         self.subproc = None
