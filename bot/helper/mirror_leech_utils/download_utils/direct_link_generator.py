@@ -145,7 +145,13 @@ debrid_link_supported_sites = [
 # list separate from the debrid list because these links do not require a
 # debrid account.
 PUBLIC_FILE_HOSTS = {
-    "gdflix": ("gdflix.com", "gdflix.dad", "gdflix.lol", "gdflix.pro"),
+    "gdflix": (
+        "gdflix.com",
+        "gdflix.dad",
+        "gdflix.dev",
+        "gdflix.lol",
+        "gdflix.pro",
+    ),
     "hubcloud": ("hubcloud.one", "hubcloud.foo", "hubcloud.lol", "hubcloud.cfd"),
     "hubdrive": (
         "hubdrive.com",
@@ -436,7 +442,13 @@ def vifix(url):
 
 
 def gdflix(url):
-    """Resolve GDFlix share pages using its public direct-download endpoint."""
+    """Resolve GDFlix share pages through its direct-download endpoint.
+
+    GDFlix's current ``.dev`` pages no longer render the legacy ``#drc``
+    button, but they still accept the same direct-download request.  The
+    request itself is therefore the source of truth rather than the optional
+    page control.
+    """
     return sharer_scraper(url)
 
 
@@ -1055,10 +1067,6 @@ def sharer_scraper(url):
     if not key:
         raise DirectDownloadLinkException("ERROR: Key not found!")
     key = key[0]
-    if not HTML(res.text).xpath("//button[@id='drc']"):
-        raise DirectDownloadLinkException(
-            "ERROR: This link don't have direct download button"
-        )
     boundary = uuid4()
     headers = {
         "Content-Type": f"multipart/form-data; boundary=----WebKitFormBoundary{boundary}",
