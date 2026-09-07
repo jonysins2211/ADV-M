@@ -442,12 +442,11 @@ def vifix(url):
 
 
 def gdflix(url):
-    """Resolve GDFlix share pages through its direct-download endpoint.
+    """Resolve GDFlix share pages to their Instant DL link.
 
-    GDFlix's current ``.dev`` pages no longer render the legacy ``#drc``
-    button, but they still accept the same direct-download request.  The
-    request itself is therefore the source of truth rather than the optional
-    page control.
+    GDFlix's direct endpoint opens a page with multiple download providers.
+    Prefer its Instant DL option so a leech does not fall back to a Google
+    Drive URL that requires the bot's Drive credentials.
     """
     return sharer_scraper(url)
 
@@ -461,6 +460,18 @@ def _download_href(html, page_url):
     )
     for href in hrefs:
         direct_url = urljoin(page_url, href)
+        if direct_url.startswith(("https://", "http://")):
+            return direct_url
+    return None
+
+
+def _instant_download_href(html, page_url):
+    """Return the Instant DL URL advertised on a GDFlix download page."""
+    for link in html.xpath("//a[@href]"):
+        label = " ".join(link.xpath(".//text()")).casefold()
+        if "instant" not in label or not ("dl" in label or "download" in label):
+            continue
+        direct_url = urljoin(page_url, link.get("href"))
         if direct_url.startswith(("https://", "http://")):
             return direct_url
     return None
@@ -1086,22 +1097,17 @@ def sharer_scraper(url):
         raise DirectDownloadLinkException(f"ERROR: {e.__class__.__name__}") from e
     if "url" not in res:
         raise DirectDownloadLinkException(
-            "ERROR: Drive Link not found, Try in your broswer"
+            "ERROR: Instant DL link not found, Try in your browser"
         )
-    if "drive.google.com" in res["url"] or "drive.usercontent.google.com" in res["url"]:
-        return res["url"]
     try:
         res = cget("GET", res["url"])
     except Exception as e:
         raise DirectDownloadLinkException(f"ERROR: {e.__class__.__name__}") from e
-    if (drive_link := HTML(res.text).xpath("//a[contains(@class,'btn')]/@href")) and (
-        "drive.google.com" in drive_link[0]
-        or "drive.usercontent.google.com" in drive_link[0]
-    ):
-        return drive_link[0]
+    if instant_link := _instant_download_href(HTML(res.text), res.url):
+        return instant_link
     else:
         raise DirectDownloadLinkException(
-            "ERROR: Drive Link not found, Try in your broswer"
+            "ERROR: Instant DL link not found, Try in your browser"
         )
 
 
