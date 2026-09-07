@@ -8,7 +8,7 @@ from re import findall, match, search
 from requests import Session, post, get, RequestException
 from requests.adapters import HTTPAdapter
 from time import sleep
-from urllib.parse import parse_qs, urljoin, urlparse, quote
+from urllib.parse import parse_qs, unquote, urljoin, urlparse, quote
 from urllib3.util.retry import Retry
 from uuid import uuid4
 from base64 import b64decode, b64encode
@@ -22,6 +22,11 @@ from ...ext_utils.status_utils import speed_string_to_bytes
 user_agent = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0"
 )
+
+GDFLIX_URLS_JSON = (
+    "https://raw.githubusercontent.com/SaurabhKaperwan/Utils/refs/heads/main/urls.json"
+)
+GDFLIX_FALLBACK_URL = "https://gdflix.dev"
 
 debrid_link_supported_sites = [
     "1fichier.com",
@@ -442,13 +447,105 @@ def vifix(url):
 
 
 def gdflix(url):
-    """Resolve GDFlix share pages to their Instant DL link.
+    """Resolve a GDFlix share URL to a URL that the direct downloader can leech.
 
-    GDFlix's direct endpoint opens a page with multiple download providers.
-    Prefer its Instant DL option so a leech does not fall back to a Google
-    Drive URL that requires the bot's Drive credentials.
+    GDFlix changes its public domain regularly.  Its domain registry keeps old
+    shared URLs useful, while the fallback maintains compatibility if the
+    registry is temporarily unavailable.  Prefer the site's ``DIRECT DL``
+    endpoint so the normal ``/leech`` path can download it without Drive
+    credentials or manual provider selection.
     """
-    return sharer_scraper(url)
+    original = urlparse(url)
+    if not original.scheme or not original.netloc:
+        raise DirectDownloadLinkException("ERROR: Invalid GDFlix URL")
+
+    with Session() as session:
+        session.headers.update(
+            {
+                "User-Agent": user_agent,
+                "Referer": f"{original.scheme}://{original.netloc}/",
+            }
+        )
+        latest_url = _gdflix_latest_url(session)
+        page_url = urljoin(latest_url.rstrip("/") + "/", original.path.lstrip("/"))
+        if original.query:
+            page_url = f"{page_url}?{original.query}"
+
+        try:
+            response = session.get(page_url, timeout=20)
+            response.raise_for_status()
+        except RequestException as e:
+            raise DirectDownloadLinkException(
+                f"ERROR: Unable to open GDFlix link ({e.__class__.__name__})"
+            ) from e
+
+        page = HTML(response.content)
+        candidates = _gdflix_download_links(page, response.url)
+        if not candidates:
+            raise DirectDownloadLinkException("ERROR: GDFlix download link not found")
+
+        # These providers expose a direct-download endpoint.  Do not return
+        # GoFile or DriveBot share pages: link generation happens once before
+        # the leech begins, so a second provider-specific resolver would not
+        # run for those URLs.
+        for label in ("direct dl", "cloud download", "pixeldrain"):
+            if link := candidates.get(label):
+                return link
+
+        if instant_url := candidates.get("instant dl"):
+            return _gdflix_instant_url(session, instant_url)
+    raise DirectDownloadLinkException("ERROR: GDFlix direct download link not found")
+
+
+def _gdflix_latest_url(session):
+    """Get and validate GDFlix's current public base URL."""
+    try:
+        response = session.get(GDFLIX_URLS_JSON, timeout=10)
+        response.raise_for_status()
+        latest_url = response.json().get("gdflix")
+        parsed = urlparse(latest_url) if isinstance(latest_url, str) else None
+        if parsed and parsed.scheme in ("http", "https") and parsed.netloc:
+            return latest_url.rstrip("/")
+    except (RequestException, ValueError):
+        pass
+    return GDFLIX_FALLBACK_URL
+
+
+def _gdflix_download_links(page, page_url):
+    """Return GDFlix provider links keyed by their normalized button label."""
+    candidates = {}
+    for anchor in page.xpath('//div[contains(@class, "text-center")]//a[@href]'):
+        label = " ".join(anchor.xpath(".//text()")).strip().casefold()
+        href = urljoin(page_url, anchor.get("href"))
+        if not href.startswith(("https://", "http://")):
+            continue
+        for provider in (
+            "direct dl",
+            "cloud download",
+            "pixeldrain",
+            "instant dl",
+            "gofile",
+            "drivebot",
+        ):
+            if provider in label:
+                candidates.setdefault(provider, href)
+                break
+    return candidates
+
+
+def _gdflix_instant_url(session, url):
+    """Extract the target from GDFlix's Instant DL redirect without following it."""
+    try:
+        response = session.get(url, allow_redirects=False, timeout=20)
+    except RequestException as e:
+        raise DirectDownloadLinkException(
+            f"ERROR: Unable to resolve GDFlix Instant DL ({e.__class__.__name__})"
+        ) from e
+    location = response.headers.get("location", "")
+    target = parse_qs(urlparse(location).query).get("url", [""])[-1]
+    if target:
+        return unquote(target)
+    raise DirectDownloadLinkException("ERROR: GDFlix Instant DL target not found")
 
 
 def _download_href(html, page_url):
