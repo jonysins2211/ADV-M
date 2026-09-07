@@ -468,7 +468,15 @@ def _download_href(html, page_url):
 def _instant_download_href(html, page_url):
     """Return the Instant DL URL advertised on a GDFlix download page."""
     for link in html.xpath("//a[@href]"):
-        label = " ".join(link.xpath(".//text()")).casefold()
+        label = " ".join(
+            (
+                link.get("class", ""),
+                link.get("id", ""),
+                link.get("title", ""),
+                link.get("aria-label", ""),
+                " ".join(link.xpath(".//text()")),
+            )
+        ).casefold()
         if "instant" not in label or not ("dl" in label or "download" in label):
             continue
         direct_url = urljoin(page_url, link.get("href"))
@@ -1095,20 +1103,27 @@ def sharer_scraper(url):
         res = cget("POST", url, cookies=res.cookies, headers=headers, data=data).json()
     except Exception as e:
         raise DirectDownloadLinkException(f"ERROR: {e.__class__.__name__}") from e
-    if "url" not in res:
+    direct_url = res.get("url")
+    if not isinstance(direct_url, str) or not direct_url:
         raise DirectDownloadLinkException(
             "ERROR: Instant DL link not found, Try in your browser"
         )
+    if "drive.google.com" in direct_url or "drive.usercontent.google.com" in direct_url:
+        return direct_url
     try:
-        res = cget("GET", res["url"])
+        res = cget("GET", direct_url)
     except Exception as e:
         raise DirectDownloadLinkException(f"ERROR: {e.__class__.__name__}") from e
     if instant_link := _instant_download_href(HTML(res.text), res.url):
         return instant_link
-    else:
-        raise DirectDownloadLinkException(
-            "ERROR: Instant DL link not found, Try in your browser"
-        )
+    # GDFlix does not offer Instant DL for every file.  Preserve the preferred
+    # provider when it is present, but use the regular download option rather
+    # than failing outright when the page only exposes Drive or another host.
+    if fallback_link := _download_href(HTML(res.text), res.url):
+        return fallback_link
+    raise DirectDownloadLinkException(
+        "ERROR: Download link not found, Try in your browser"
+    )
 
 
 def wetransfer(url):
